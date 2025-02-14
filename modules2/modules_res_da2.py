@@ -1,0 +1,162 @@
+import torch
+import torch.nn as nn
+
+
+class InConv(nn.Module):
+    def __init__(self, in_ch, out_ch, dilation):
+        super(InConv, self).__init__()
+        self.conv = DoubleConv(in_ch, out_ch, dilation)
+
+    def forward(self, x):
+        x = self.conv(x)
+        return x
+
+
+class Down(nn.Module):
+    def __init__(self, in_ch, out_ch, dilation):
+        super(Down, self).__init__()
+        self.mpconv = nn.Sequential(
+            nn.MaxPool3d(2, 2),
+            DoubleConv(in_ch, out_ch, dilation)
+        )
+
+    def forward(self, x):
+        x = self.mpconv(x)
+        return x
+
+
+class OutConv(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super(OutConv, self).__init__()
+        self.conv = nn.Conv3d(in_ch, out_ch, 1)
+        # self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        x = self.conv(x)
+        # x = self.sigmoid(x)
+        return x
+
+
+class DoubleConv(nn.Module):
+    def __init__(self, in_ch, out_ch, dilation):
+        super(DoubleConv, self).__init__()
+        self.conv1 = nn.Sequential(
+            nn.Conv3d(in_ch, out_ch, kernel_size=3, stride=1, padding=dilation[0], dilation=dilation[0]),
+            nn.BatchNorm3d(out_ch),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(out_ch, out_ch, kernel_size=3, stride=1, padding=dilation[0], dilation=dilation[0]),
+            nn.BatchNorm3d(out_ch),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(out_ch, out_ch, kernel_size=3, stride=1, padding=dilation[0], dilation=dilation[0]),
+            nn.BatchNorm3d(out_ch),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(out_ch, out_ch, kernel_size=3, stride=1, padding=dilation[0], dilation=dilation[0]),
+            nn.BatchNorm3d(out_ch),
+            nn.ReLU(inplace=True),
+        )
+        self.conv2 = nn.Sequential(
+            nn.Conv3d(in_ch, out_ch, kernel_size=3, stride=1, padding=dilation[1], dilation=dilation[1]),
+            nn.BatchNorm3d(out_ch),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(out_ch, out_ch, kernel_size=3, stride=1, padding=dilation[1], dilation=dilation[1]),
+            nn.BatchNorm3d(out_ch),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(out_ch, out_ch, kernel_size=3, stride=1, padding=dilation[1], dilation=dilation[1]),
+            nn.BatchNorm3d(out_ch),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(out_ch, out_ch, kernel_size=3, stride=1, padding=dilation[1], dilation=dilation[1]),
+            nn.BatchNorm3d(out_ch),
+            nn.ReLU(inplace=True),
+        )
+        self.conv3 = nn.Sequential(
+            nn.Conv3d(in_ch, out_ch, kernel_size=3, stride=1, padding=dilation[2], dilation=dilation[2]),
+            nn.BatchNorm3d(out_ch),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(out_ch, out_ch, kernel_size=3, stride=1, padding=dilation[2], dilation=dilation[2]),
+            nn.BatchNorm3d(out_ch),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(out_ch, out_ch, kernel_size=3, stride=1, padding=dilation[2], dilation=dilation[2]),
+            nn.BatchNorm3d(out_ch),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(out_ch, out_ch, kernel_size=3, stride=1, padding=dilation[2], dilation=dilation[2]),
+            nn.BatchNorm3d(out_ch),
+            nn.ReLU(inplace=True),
+        )
+        self.skip1 = nn.Sequential(
+            nn.Conv3d(in_ch, out_ch, kernel_size=1, stride=1),
+            nn.BatchNorm3d(out_ch, affine=True),
+            nn.ReLU(),
+        )
+        # self.skip2 = nn.Sequential(
+        #     nn.Conv3d(out_ch, out_ch, kernel_size=1, stride=1),
+        #     nn.BatchNorm3d(out_ch),
+        #     nn.ReLU(inplace=True),
+        # )
+
+    def forward(self, x):
+        x1 = self.conv1(x) + self.skip1(x)
+        x2 = self.conv2(x) + self.skip1(x)
+        x3 = self.conv3(x) + self.skip1(x)
+        return torch.cat([x1, x2, x3], dim=1)
+
+
+class Up(nn.Module):
+    def __init__(self, in_ch, skip_ch, out_ch, dilation):
+        super(Up, self).__init__()
+        self.up = nn.ConvTranspose3d(in_ch, in_ch, kernel_size=2, stride=2)
+        self.conv = DoubleConv(in_ch + skip_ch, out_ch, dilation)
+
+    def forward(self, x1, x2):
+        x1 = self.up(x1)
+        x = torch.cat([x2, x1], dim=1)
+        x = self.conv(x)
+        return x
+
+
+class SE_Block(nn.Module):
+    def __init__(self, in_channel, out_channel, reduction=8):
+        super(SE_Block, self).__init__()
+        self.out_channel = out_channel
+        self.avg_pool = nn.AdaptiveAvgPool3d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(in_channel, in_channel // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(in_channel // reduction, in_channel, bias=False),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x):
+        a, b, _, _, _ = x.size()
+        y = self.avg_pool(x).view(a, b)
+        y = self.fc(y).view(a, b, 1, 1, 1)
+        z = x * y.expand_as(x)
+        return z
+
+
+class CAM(nn.Module):
+    def __init__(self, channels, ratio):
+        super(CAM, self).__init__()
+        self.avg_pooling = nn.AdaptiveAvgPool3d(1)
+        self.max_pooling = nn.AdaptiveMaxPool3d(1)
+        self.fc_layers = nn.Sequential(
+            nn.Linear(in_features=channels, out_features=channels // ratio, bias=False),
+            nn.ReLU(),
+            nn.Linear(in_features=channels // ratio, out_features=channels, bias=False)
+        )
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        b, c, _, _, _ = x.shape
+        avg_x = self.avg_pooling(x).view(b, c)
+        max_x = self.max_pooling(x).view(b, c)
+        v = self.fc_layers(avg_x) + self.fc_layers(max_x)
+        v = self.sigmoid(v).view(b, c, 1, 1, 1)
+        return x * v
+
+
+if __name__ == '__main__':
+    x = torch.rand(1, 16, 120, 120, 80)
+    print(x.size())
+    model = CAM(16, 16)
+    output = model(x)
+    print(output.size())
